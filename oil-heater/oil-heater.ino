@@ -6,10 +6,18 @@
 #include <ctime>
 #include <iostream>
 #include "wlan.h"
+#include <Wire.h>
+#include <hd44780.h>                       // main hd44780 header
+#include <hd44780ioClass/hd44780_I2Cexp.h> // i2c expander i/o class header
 
 void ghData();
 
 #define DATAPOINT_SIZE 8640
+
+// LCD geometry
+const int LCD_COLS = 16;
+const int LCD_ROWS = 2;
+hd44780_I2Cexp lcd;
 
 const char* ssid = WLAN;
 const char* password = WLAN_PW;
@@ -22,6 +30,7 @@ time_t lastEventTime = 0;
 int lastEventCounter = 0;
 bool vibStateAlreadyWritten = false;
 bool noVibStateAlreadyWritten = false;
+int lastDay = 0;
 
 WebServer server(80);
 
@@ -73,6 +82,35 @@ void handleNotFound() {
   server.send(404, "text/plain", message);
 }
 
+void setupLcd(void) {
+  int status;
+
+	// initialize LCD with number of columns and rows: 
+	// hd44780 returns a status from begin() that can be used
+	// to determine if initalization failed.
+	// the actual status codes are defined in <hd44780.h>
+	// See the values RV_XXXX
+	//
+	// looking at the return status from begin() is optional
+	// it is being done here to provide feedback should there be an issue
+	//
+	// note:
+	//	begin() will automatically turn on the backlight
+	//
+	status = lcd.begin(LCD_COLS, LCD_ROWS);
+
+	if(status) // non zero status means it was unsuccesful
+	{
+		// hd44780 has a fatalError() routine that blinks an led if possible
+		// begin() failed so blink error code using the onboard LED if possible
+    Serial.println("error during lcd init");
+		hd44780::fatalError(status); // does not return
+	}
+
+	// initalization was successful, the backlight should be on now
+  Serial.println("lcd init success");
+}
+
 void setup(void) {
   for (int j = 0; j < DATAPOINT_SIZE; j++) {
     points[j].time = 0;
@@ -109,7 +147,7 @@ void setup(void) {
     Serial.println("timeserver found");
   }
 
-  if (MDNS.begin("esp32")) {
+  if (MDNS.begin("oilheater")) {
     Serial.println("MDNS responder started");
   }
 
@@ -126,25 +164,33 @@ void setup(void) {
 
 // make json out of data points array
 void ghData() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/plain", "");
+
   char buff[30];
-  String gd = "{\"data\":[";
   
-  for (int j = 0; j < DATAPOINT_SIZE; j++) {
-    if (points[j].time == 0)
-      break;
-    gd += "{\"t\":";
-    ltoa(getTime(points[j].time), buff, 10);
-    gd += buff;
-    gd += ",\"v\":";
-    if (points[j].vibration > 0) {
-      gd += "1";
-    } else {
-      gd += "0";
+  for (int j = 0; j < DATAPOINT_SIZE;) {
+    String gd = "";
+    
+    for (int z = 0; z < 2; z++) {
+      if (points[j].time == 0)
+        break;
+      ltoa(getTime(points[j].time), buff, 10);
+      gd += buff;
+      gd += '\t';
+      if (points[j].vibration > 0) {
+        gd += "1";
+      } else {
+        gd += "0";
+      }
+      gd += '\r';
+      gd += '\n';
+      
+      j++;
     }
-    gd += "},";
+
+    server.sendContent(gd);
   }
-  gd += "]}";
-  server.send(200, "application/json", gd);
 }
 
 int stateChanges = 0;
@@ -172,6 +218,7 @@ void loop(void) {
         vibStateAlreadyWritten = true;
         noVibStateAlreadyWritten = false;
 
+        int currentDay = DateTime.getParts().getYearDay();
         long int seconds = getTime(DateTime.now());
         points[pointsPointer].time = seconds - 1;
         points[pointsPointer++].vibration = false;
